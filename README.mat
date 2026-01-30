@@ -1,0 +1,335 @@
+# CRYPTOGRAPHY AND NETWORK SECURITY
+# PRNG Toolkit with Separate PRNG Sequence Generator & Fixed GUI Layout
+function prng_toolkit_full()
+ close all; clc;
+ logger('INFO','=== Starting PRNG Toolkit (Full Integrated Version) ===');
+ % PARAMETERS
+ N = 1e5; bins = 20;
+ seeds = [12345, 67890, 24680, 13579, 98765];
+ generators = {'LCG','XORShift32','MT19937', 'Hybrid'};
+ % RUN & TEST ALL GENERATORS
+ for i = 1:numel(generators)
+ gname = generators{i};
+ logger('INFO','Running generator: %s', gname);
+ batch_and_export(gname, seeds, N, bins, sprintf('%s_results.csv', gname));
+ end
+ % PERFORMANCE TEST
+ logger('INFO','Running performance benchmark for XORShift32');
+ tic;
+ u = generate_xorshift32(uint32(123456), 1e6);
+ t = toc;
+ logger('INFO','XORShift32 generated 1e6 samples in %.3f sec', t);
+ % OTP & HASH DEMO
+ logger('INFO','Generating secure OTP & salted hash demo');
+ otp = generate_numeric_otp(6);
+ logger('INFO','OTP (masked): ******');
+ pw = 'DemoPassword123';
+ salt = secure_random_hex(16);
+ hashv = sha256_hex([pw salt]);
+ logger('INFO','Salt (masked): %s', [salt(1:4) '...' salt(end-4:end)]);
+ logger('INFO','SHA-256 hash computed successfully');
+ % CAPTCHA DEMO
+ captcha_img = captcha_generate('PRNG','FontSize',48,'NoiseLevel',0.08);
+ imwrite(captcha_img,'captcha_demo.png');
+ logger('INFO','CAPTCHA demo saved');
+ % GUI LAUNCH
+ logger('INFO','Launching GUI');
+ launch_gui();
+ uiwait(gcf); % keeps GUI open until closed manually
+ logger('INFO','=== Toolkit execution complete ===');
+end
+
+% LOGGER
+function logger(level, msg, varargin)
+ persistent fid;
+ if isempty(fid)
+ fid = fopen(fullfile(pwd,'prng_toolkit.log'),'a');
+end
+ ts = datestr(now,'yyyy-mm-dd HH:MM:SS');
+ fprintf(fid,'%s [%s] %s\n',ts,level,sprintf(msg,varargin{:}));
+ fprintf('%s [%s] %s\n',ts,level,sprintf(msg,varargin{:}));
+end
+
+% PRNG MODULES
+function U = generate_lcg(seed,a,c,m,N)
+ X = zeros(N,1,'uint64');
+ X(1) = bitand(seed,m-1);
+ for k = 2:N
+ X(k) = mod(a*X(k-1)+c,m);
+ end
+ U = double(X)/double(m);
+end
+function U = generate_xorshift32(seed,N)
+ x = uint32(seed);
+ if x == 0, x = uint32(2463534242); end
+ U = zeros(N,1);
+ for k = 1:N
+ x = bitxor(x, bitshift(x,13));
+ x = bitxor(x, bitshift(x,-17));
+ x = bitxor(x, bitshift(x,5));
+ U(k) = double(x)/double(2^32);
+ end
+end
+function U = generate_mt19937(N)
+ s = rng; rng('twister'); U = rand(N,1); rng(s);
+end
+function U = generate_hybrid(N, seed)
+ xorshift_vals = generate_xorshift32(seed, N);
+ mt19937_vals = generate_mt19937(N);
+ U = zeros(N,1);
+ U(1:2:end) = xorshift_vals(1:ceil(N/2));
+ U(2:2:end) = mt19937_vals(1:floor(N/2));
+end
+function U = generate_sequence(name,N,seed)
+ if nargin<3, seed=12345; end
+ switch upper(name)
+ case 'LCG'
+ a=uint64(1664525); c=uint64(1013904223); m=uint64(2^32);
+ U=generate_lcg(uint64(seed),a,c,m,N);
+ case 'XORSHIFT32'
+ U=generate_xorshift32(uint32(seed),N);
+ case 'MT19937'
+ U=generate_mt19937(N);
+ case 'HYBRID'
+ U=generate_hybrid(N, seed);
+ end
+end
+% STATISTICAL TESTS
+function out=frequency_test(U)
+ n=numel(U); bits=U>=0.5; n1=sum(bits);
+ p_hat=n1/n; se=sqrt(0.25/n); z=(p_hat-0.5)/se;
+ p=2*(1-normcdf(abs(z)));
+ out=struct('p_hat',p_hat,'z',z,'p',p);
+end
+function out=runs_test(U)
+ bits=double(U>=0.5); n=numel(bits);
+ R=1+sum(bits(1:end-1)~=bits(2:end));
+ n1=sum(bits); n0=n-n1;
+ if n1==0 || n0==0, out=struct('R',R,'ER',NaN,'z',NaN,'p',0); return; end
+ ER=1+2*n1*n0/n;
+ V=(2*n1*n0*(2*n1*n0-n))/(n^2*(n-1));
+ z=(R-ER)/sqrt(V); p=2*(1-normcdf(abs(z)));
+ out=struct('R',R,'ER',ER,'z',z,'p',p);
+end
+function out=chi_square_test(U,bins)
+ n=numel(U); edges=linspace(0,1,bins+1);
+ counts=histcounts(U,edges); expected=n/bins;
+ chi2=sum((counts-expected).^2/expected);
+ df=bins-1; p=1-chi2cdf(chi2,df);
+ out=struct('chi2',chi2,'df',df,'p',p);
+end
+function out=serial_correlation_test(U)
+ x=U(:); n=numel(x); xm=mean(x);
+ num=sum((x(1:end-1)-xm).*(x(2:end)-xm)); den=sum((x-xm).^2);
+ r=num/den; t=r*sqrt((n-2)/(1-r^2+eps));
+ p=2*(1-tcdf(abs(t),n-2));
+ out=struct('r',r,'tstat',t,'p',p);
+end
+
+% VALIDATION + EXPORT
+function batch_and_export(gname,seeds,N,bins,fname)
+ fid=fopen(fname,'w');
+
+fprintf(fid,'generator,seed,frequency_p,runs_p,chi2_p,serial_p,entropy_bits\n');
+ for k=1:numel(seeds)
+ U=generate_sequence(gname,N,seeds(k));
+ f=frequency_test(U); r=runs_test(U);
+ c=chi_square_test(U,bins); s=serial_correlation_test(U);
+ H=shannon_entropy_bytes(U);
+ fprintf(fid,'%s,%d,%.5f,%.5f,%.5f,%.5f,%.4f\n',gname,seeds(k),...
+ f.p,r.p,c.p,s.p,H);
+ end
+ fclose(fid);
+ logger('INFO','Exported %s results to %s',gname,fname);
+end
+function H=shannon_entropy_bytes(U)
+ bytes=uint8(floor(U*256)); counts=histcounts(bytes,0:256);
+ p=counts/sum(counts); p=p(p>0);
+ H=-sum(p.*log2(p));
+end
+
+% CRYPTOGRAPHIC UTILITIES
+function hex = secure_random_hex(nbytes)
+ assert(nbytes > 0, 'nbytes must be positive');
+ sr = java.security.SecureRandom();
+ jb = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, nbytes);
+ sr.nextBytes(jb);
+ b = zeros(1, nbytes, 'uint8');
+ for i = 1:nbytes
+ v = double(jb(i));
+ if v < 0, v = v + 256; end
+ b(i) = uint8(v);
+ end
+ hex = lower(reshape(dec2hex(b, 2)', 1, []));
+end
+function otp = generate_numeric_otp(len)
+ if nargin<1, len=6; end
+ sr = java.security.SecureRandom();
+ m = 10^len;
+ num = sr.nextInt(m);
+ if num < 0, num = num + m; end
+ otp = sprintf(['%0' num2str(len) 'd'], double(num));
+end
+function hex = sha256_hex(msg)
+ md = java.security.MessageDigest.getInstance('SHA-256');
+ md.update(uint8(msg));
+ d = md.digest();
+ hex = lower(reshape(dec2hex(typecast(d,'uint8'),2)',1,[]));
+end
+
+% CAPTCHA GENERATOR
+function img = captcha_generate(txt, varargin)
+ p = inputParser;
+ addParameter(p,'W',300);
+ addParameter(p,'H',100);
+ addParameter(p,'FontSize',36);
+ addParameter(p,'NoiseLevel',0.06);
+ parse(p,varargin{:});
+ W = p.Results.W;
+ H = p.Results.H;
+ fs = p.Results.FontSize;
+ nl = p.Results.NoiseLevel;
+ img = uint8(255 * ones(H, W, 3));
+ try
+ img = insertText(img, [round(W * 0.1), round(H * 0.25)], txt, ...
+ 'FontSize', fs, 'BoxOpacity', 0, 'AnchorPoint', 'LeftTop');
+ catch
+ f = figure('Visible', 'off', 'Position', [100 100 W H]);
+ axis off;
+ xlim([0 W]); ylim([0 H]);
+ text(W * 0.1, H * 0.5, txt, 'FontSize', fs, 'FontWeight', 'bold');
+ set(gca, 'Color', [1 1 1]);
+ frame = getframe(gca);
+ img = frame2im(frame);
+ close(f);
+ end
+ img = im2double(img);
+ img = imnoise(img, 'gaussian', 0, nl);
+ img = im2uint8(img);
+ numLines = randi([3, 6]);
+ for k = 1:numLines
+ x1 = randi([1 W]); y1 = randi([1 H]);
+ x2 = randi([1 W]); y2 = randi([1 H]);
+ img = draw_line(img, [x1 y1], [x2 y2]);
+ end
+end
+function im = draw_line(im, p1, p2)
+ x1 = p1(1); y1 = p1(2); x2 = p2(1); y2 = p2(2);
+ dx = abs(x2 - x1); dy = abs(y2 - y1);
+ sx = sign(x2 - x1); sy = sign(y2 - y1);
+ err = dx - dy; x = x1; y = y1;
+ while true
+ if x >= 1 && x <= size(im, 2) && y >= 1 && y <= size(im, 1)
+ im(y, x, :) = uint8(40);
+ end
+ if x == x2 && y == y2, break; end
+ e2 = 2 * err;
+ if e2 > -dy, err = err - dy; x = x + sx; end
+ if e2 < dx, err = err + dx; y = y + sy; end
+ end
+end
+
+% GUI MODULE (Modified Layout)
+function launch_gui()
+ fig = uifigure('Name','PRNG Toolkit','Position',[200 150 900 600]);
+ tg = uitabgroup(fig,'Position',[20 20 860 560]);
+ % Tabs
+ tabGen = uitab(tg,'Title','Generators');
+ tabTests = uitab(tg,'Title','Tests');
+ tabCrypto = uitab(tg,'Title','OTP / Hash');
+ %% Generator tab
+ uilabel(tabGen,'Text','Select Generator:','FontWeight','bold',...
+ 'Position',[40 470 120 25]);
+ dd = uidropdown(tabGen,'Items',{'LCG','XORShift32','MT19937', 'Hybrid'},...
+ 'Position',[170 470 150 25]);
+ uilabel(tabGen,'Text','Samples (N):','FontWeight','bold',...
+ 'Position',[340 470 120 25]);
+ nField = uieditfield(tabGen,'numeric','Value',1e5,...
+ 'Position',[470 470 100 25]);
+ % Histogram (top)
+ ax = uiaxes(tabGen,'Position',[60 300 740 220]);
+ title(ax,'Histogram of Generated Numbers');
+ xlabel(ax,'Value'); ylabel(ax,'Frequency');
+ % PRNG Sequence Visualization (bottom)
+ axSeq = uiaxes(tabGen,'Position',[60 50 740 200]);
+ title(axSeq,'PRNG Sequence Visualization');
+ xlabel(axSeq,'Sample Index'); ylabel(axSeq,'Generated Value');
+ % Run button
+ uibutton(tabGen,'Text','Run','FontSize',12,'FontWeight','bold',...
+ 'BackgroundColor',[0.3 0.7 1],'Position',[600 468 100 30],...
+
+'ButtonPushedFcn',@(src,evt)run_generator_ui(dd.Value,round(nField.Value),ax,axSeq
+));
+ %% Tests tab
+ uitextarea(tabTests,'Position',[100 420 700 100],...
+ 'Value',{'Click below to run Frequency, Runs, Chi², and Serial tests for
+all generators.'},...
+ 'Editable','off','FontSize',11);
+ resultBox = uitextarea(tabTests,'Position',[100 100 700 300],...
+ 'Editable','off','FontName','Consolas','FontSize',11,...
+ 'Value',{'Results will appear here...'},'Tag','ResultBox');
+ uibutton(tabTests,'Text','Run All Tests','FontSize',12,...
+ 'Position',[340 440 200 30],'BackgroundColor',[0.4 0.8 0.4],...
+ 'FontWeight','bold','ButtonPushedFcn',@(src,evt)run_all_tests_ui(fig));
+ %% Crypto tab
+ uibutton(tabCrypto,'Text','Generate OTP','FontSize',12,...
+ 'Position',[150 460 180 35],'BackgroundColor',[0.3 0.8 0.9],...
+ 'FontWeight','bold','ButtonPushedFcn',@(src,evt)show_otp(fig));
+ uibutton(tabCrypto,'Text','Generate Salted Hash','FontSize',12,...
+ 'Position',[400 460 220 35],'BackgroundColor',[0.6 0.6 1],...
+ 'FontWeight','bold','ButtonPushedFcn',@(src,evt)show_hash(fig));
+ uitextarea(tabCrypto,'Position',[100 100 700 320],'Value',...
+ {'Demonstrates secure OTP generation using SecureRandom',...
+ 'and SHA-256 salted hashing for password security.'},...
+ 'Editable','off','FontSize',11);
+end
+function run_generator_ui(gen,N,ax,axSeq)
+ logger('INFO','Generating %s with N=%d',gen,N);
+ U = generate_sequence(gen,N);
+ cla(ax); cla(axSeq);
+ histogram(ax,U,50);
+ plot(axSeq,1:N,U,'LineWidth',1.2);
+ title(ax,sprintf('%s (%d samples)',gen,N));
+ xlabel(ax,'Value'); ylabel(ax,'Count');
+ title(axSeq,'PRNG Sequence Visualization');
+ xlabel(axSeq,'Sample Index'); ylabel(axSeq,'Generated Value');
+ drawnow;
+end
+
+function run_all_tests_ui(fig)
+ box = findobj(fig,'Tag','ResultBox');
+ N = 1e5; bins = 20; seeds = [12345,67890,24680,13579,98765];
+ gens = {'LCG','XORShift32','MT19937','Hybrid'};
+ box.Value = {'Running PRNG tests...'}; drawnow;
+ for g = 1:numel(gens)
+ gname = gens{g};
+ box.Value = [box.Value; {sprintf('--- %s ---', gname)}];
+ for s = 1:numel(seeds)
+ U = generate_sequence(gname,N,seeds(s));
+ f = frequency_test(U); r = runs_test(U);
+ c = chi_square_test(U,bins); sc = serial_correlation_test(U);
+ H = shannon_entropy_bytes(U);
+ msg = sprintf('Seed %6d | F=%.3f | R=%.3f | C=%.3f | S=%.3f |
+H=%.3f',...
+ seeds(s),f.p,r.p,c.p,sc.p,H);
+ box.Value = [box.Value; {msg}]; drawnow;
+ end
+ box.Value = [box.Value; {' '}]; drawnow;
+ end
+ box.Value = [box.Value; {'All tests completed successfully.'}];
+ drawnow;
+end
+
+function show_otp(fig)
+ otp = generate_numeric_otp(6);
+ uialert(fig,['Your OTP is: ' otp],'Secure OTP');
+end
+
+function show_hash(fig)
+ pw = 'DemoPassword123';
+ salt = secure_random_hex(16);
+ hashv = sha256_hex([pw salt]);
+ msg = sprintf('Salt (masked): %s...%s\nSHA-256: %s',...
+ salt(1:4),salt(end-4:end),hashv(1:16));
+ uialert(fig,msg,'Salted Hash');
+end
